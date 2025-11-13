@@ -60,6 +60,332 @@ def assign_action(row):
 # -------------------------------------------------------------------
 # 🧠 Violation Predictor Class (with Auto-Computed behavior_ratio)
 # -------------------------------------------------------------------
+
+            
+# -------------------------------------------------------------------
+# 🧠 Logistic Regression–Only Violation Predictor 2
+# -------------------------------------------------------------------
+class ViolationPredictor:
+    def __init__(self, csv_file, dataset_type='training'):
+        self.logistic_model = LogisticRegression(max_iter=1000, class_weight='balanced')
+        self.features = None
+        self.student_data = None
+        self.train_model(csv_file, dataset_type)
+
+    # ---------------------------------------------------------------
+    # 🧩 Data Preparation & Training
+    # ---------------------------------------------------------------
+    def load_and_prepare(self, data: pd.DataFrame):
+        """Prepare dataset with final engineered features."""
+        df = data.copy()
+        if "will_reoffend_same_violation" not in df.columns:
+            raise ValueError("Missing column: 'will_reoffend_same_violation'")
+
+        # --- Final Feature Engineering ---
+        df["violation_rate"] = df["total_violations"] / df["total_incident"].replace(0, np.nan)
+        df["repeat_violation_rate"] = df["total_repeated_violations"] / df["total_violations"].replace(0, np.nan)
+        df["no_violation_rate"] = df["total_no_violation_in_cases"] / df["total_incident"].replace(0, np.nan)
+        df["log_total_incident"] = np.log1p(df["total_incident"])
+        df = df.fillna(0)
+
+        X = df[["violation_rate", "repeat_violation_rate", "no_violation_rate", "log_total_incident"]]
+        y = df["will_reoffend_same_violation"]
+
+        self.features = X.columns
+        self.student_data = df
+        return X, y
+        
+    def train_model(self, csv_file, dataset_type):
+        """Train logistic regression model from CSV dataset."""
+        path_prefix = f'{dataset_type}/' if dataset_type else ''
+        data_path = f"./dataset/{path_prefix}{csv_file}.csv"
+
+        X, y = self.load_and_prepare(pd.read_csv(data_path))
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+        self.logistic_model.fit(X_train, y_train)
+
+        # Evaluate performance
+        y_pred = self.logistic_model.predict(X_test)
+        y_prob = self.logistic_model.predict_proba(X_test)[:, 1]
+
+        print("=== Logistic Regression Performance ===")
+        print("Accuracy:", accuracy_score(y_test, y_pred))
+        print("ROC-AUC:", roc_auc_score(y_test, y_prob))
+        print("\nClassification Report:\n", classification_report(y_test, y_pred))
+
+    # ---------------------------------------------------------------
+    # ⚙️ Auto Compute Final Features for Single Input
+    # ---------------------------------------------------------------
+    def _auto_compute_features(self, student: dict) -> dict:
+        total_incident = student.get("total_incidents", 0)
+        total_violations = student.get("total_violations", 0)
+        total_repeated = student.get("total_repeated_violations", 0)
+        total_no_violation = student.get("total_no_violations", 0)
+
+        violation_rate = total_violations / total_incident if total_incident > 0 else 0
+        repeat_violation_rate = total_repeated / total_violations if total_violations > 0 else 0
+        no_violation_rate = total_no_violation / total_incident if total_incident > 0 else 0
+        log_total_incident = np.log1p(total_incident)
+
+        return {
+            "violation_rate": round(violation_rate, 4),
+            "repeat_violation_rate": round(repeat_violation_rate, 4),
+            "no_violation_rate": round(no_violation_rate, 4),
+            "log_total_incident": round(log_total_incident, 4),
+        }
+
+    # ---------------------------------------------------------------
+    # 🎯 Predict Reoffense Risk for a Student
+    # ---------------------------------------------------------------
+    def predict_reoffense_risk(self, student_input):
+        """Predict reoffense probability for a single student."""
+        if isinstance(student_input, dict):
+            student = student_input.copy()
+        else:
+            raise TypeError("student_input must be a dict.")
+
+        computed = self._auto_compute_features(student)
+        X_single = pd.DataFrame([computed])
+
+        # Predict probability
+        base_prob = float(self.logistic_model.predict_proba(X_single)[0][1])
+
+        # Adjusted probability (behavior + exposure correction)
+        behavior_factor = 1 - (0.9 * computed["no_violation_rate"])  # protective
+        exposure_factor = 1 + min(computed["log_total_incident"] / 5, 0.25)  # exposure scaling
+        adjusted = min(max(base_prob * behavior_factor * exposure_factor, 0), 1)
+
+        # Risk Level Categorization
+        if adjusted >= 0.85:
+            risk_level = "Critical"
+        elif adjusted >= 0.65:
+            risk_level = "High"
+        elif adjusted >= 0.40:
+            risk_level = "Medium"
+        else:
+            risk_level = "Low"
+
+        return make_json_safe({
+            "student_id": str(student.get("student_id", "Unknown")),
+            "probability_of_reoffense": round(adjusted, 4),
+            "risk_level": risk_level,
+            "total_violations": student_input['total_violations'],
+            "computed_violation_rate": computed["violation_rate"],
+            "total_repeated_violations": student_input['total_repeated_violations'],
+            "computed_repeat_violation_rate": computed["repeat_violation_rate"],
+            "computed_no_violation_rate": computed["no_violation_rate"],
+            "total_incidents": student_input["total_incidents"],
+            "log_total_incident": computed["log_total_incident"],
+            "no_violations": student_input['total_no_violations'],
+            "note": "Predicted successfully"
+        })
+        
+    # ---------------------------------------------------------------
+    # 📊 Get Student Risk Monitoring (Batch Watchlist)
+    # ---------------------------------------------------------------
+    def get_student_risk_monitoring(self, input_data):
+        """
+        Generate a risk monitoring table for multiple students.
+        Accepts: list of dicts or a DataFrame.
+        Returns: list of ranked student risks.
+        """
+        if isinstance(input_data, dict):
+            df = pd.DataFrame([input_data])
+        elif isinstance(input_data, list) and all(isinstance(i, dict) for i in input_data):
+            df = pd.DataFrame(input_data)
+        elif isinstance(input_data, pd.DataFrame):
+            df = input_data.copy()
+        else:
+            raise TypeError("input_data must be a dict, list of dicts, or DataFrame.")
+
+        results = []
+        for i, row in df.iterrows():
+            student = row.to_dict()
+            prediction = self.predict_reoffense_risk(student)
+            results.append(prediction)
+
+        # Sort by probability (descending)
+        sorted_results = sorted(results, key=lambda x: x["probability_of_reoffense"], reverse=True)
+
+        return make_json_safe(sorted_results)
+    
+    
+    # ---------------------------------------------------------------
+    # 🧩 Generate Insight (Supportive Behavioral Observation Summary)
+    # ---------------------------------------------------------------
+    def generate_insight(self, student_result):
+        """
+        Generates a balanced, non-judgmental insight summary about a student’s behavioral record.
+        Adapts tone and phrasing according to incident frequency, repetition, and resolution balance.
+        """
+
+        total_incident = student_result.get("total_incident", 0)
+        total_violations = student_result.get("total_violations", 0)
+        total_repeated_violations = student_result.get("total_repeated_violations", 0)
+        total_no_violations = student_result.get("total_no_violations", 0)
+        risk_level = student_result.get("risk_level", "Unknown")
+
+        # --- Derived behavioral indicators ---
+        violation_rate = total_violations / (total_incident + 1)
+        repeat_violation_rate = total_repeated_violations / (total_violations + 1)
+        no_violation_rate = total_no_violations / (total_incident + 1)
+        log_inc = np.log(total_incident + 1)
+
+        # --- Risk framing ---
+        if risk_level.lower() == "critical":
+            risk_statement = (
+                "According to behavioral indicators, the student is presently categorized as **CRITICAL RISK** "
+                "for potentially repeating a similar type of incident. This does not imply certainty, but rather highlights "
+                "a pattern that would benefit from structured guidance, active mentoring, and regular check-ins. "
+            )
+        else:
+            risk_statement = (
+                f"According to behavioral indicators, the student is presently categorized as **{risk_level.upper()} RISK** "
+                f"for potentially repeating a similar type of incident. "
+            )
+
+        # --- Violation pattern ---
+        if violation_rate >= 0.75:
+            violation_pattern = (
+                "The student has been involved in nearly all recorded cases as disciplinary violations, indicating a consistent pattern "
+                "of behavioral challenges that may require targeted support and clearer reinforcement of expectations. "
+            )
+        elif violation_rate >= 0.4:
+            violation_pattern = (
+                "The student has taken part in several disciplinary situations, showing occasional lapses that could be improved "
+                "through mentoring, reflection, and ongoing feedback. "
+            )
+        else:
+            violation_pattern = (
+                "The student has maintained generally appropriate conduct, with few disciplinary cases recorded. "
+                "Incidents appear to be manageable through encouragement and guidance. "
+            )
+
+        # --- Repetition pattern (adjusted threshold so 2/4 is serious) ---
+        if total_repeated_violations == 0:
+            repeat_pattern = (
+                "No repeated violations have been recorded, suggesting developing awareness and responsiveness to feedback. "
+            )
+        elif repeat_violation_rate >= 0.4:
+            repeat_pattern = (
+                "A notable portion of cases involve similar or repeated behaviors, reflecting patterns that would benefit from close supervision "
+                "and reflective interventions. Providing opportunities to practice self-regulation and accountability may help reduce recurrence. "
+            )
+        else:
+            repeat_pattern = (
+                "Some repeated elements have been observed, though improvement remains possible with regular mentoring and open communication. "
+            )
+
+        # --- Positive resolution factors ---
+        if no_violation_rate >= 0.6:
+            positive_factor = (
+                "Many cases were resolved without violations, indicating responsiveness to corrective strategies and readiness for improvement. "
+            )
+        elif no_violation_rate >= 0.3:
+            positive_factor = (
+                "Several incidents were resolved positively, suggesting the student can apply feedback effectively when supported. "
+            )
+        else:
+            positive_factor = (
+                "Few or no incidents were resolved without violations, indicating that structured opportunities for reflection and guided recovery "
+                "could strengthen behavioral outcomes. "
+            )
+
+        # --- Exposure context ---
+        if log_inc >= 2.5:
+            exposure_context = (
+                "The student has extensive experience with disciplinary procedures, creating a foundation for reflection and progressive improvement "
+                "through sustained guidance. "
+            )
+        elif log_inc <= 1.3:
+            exposure_context = (
+                "The student’s exposure to disciplinary processes has been limited, suggesting an early stage of behavioral development. "
+                "Preventive engagement and positive reinforcement may be most effective at this stage. "
+            )
+        else:
+            exposure_context = (
+                "The student has experienced a moderate number of cases, offering sufficient opportunity for feedback and gradual improvement. "
+            )
+
+        # --- Combine all sections ---
+        summary = (
+            f"{risk_statement}{violation_pattern}{repeat_pattern}"
+            f"{positive_factor}{exposure_context}"
+            "Overall, the student demonstrates both areas of progress and aspects needing consistent reinforcement. "
+            "The prefect is encouraged to provide calm, supportive oversight and maintain open communication, focusing on steady improvement "
+            "rather than punitive action."
+        )
+
+        return make_json_safe({
+            "risk_level": risk_level,
+            "insight_summary": summary
+        })
+
+
+
+
+
+
+    # ---------------------------------------------------------------
+    # 🎯 Generate Recommendation (Neutral Prefect Advisory Notes)
+    # ---------------------------------------------------------------
+    def generate_recommendation(self, risk_level):
+        """
+        Provides a balanced, developmental recommendation for the prefect based on the student's
+        current risk category. Recommendations emphasize structured guidance, empathy, and positive engagement.
+        """
+
+        level = risk_level.lower()
+
+        if level == "critical":
+            rec = (
+                "The student's behavioral indicators reflect a critical level of concern that requires immediate, structured, and compassionate support. "
+                "The prefect should coordinate with the Guidance Office, class adviser, and where appropriate, parents or guardians, "
+                "to organize a formal review of the student’s circumstances. A detailed support plan should be developed that includes "
+                "consistent mentorship, regular progress check-ins, and personalized reflection sessions. "
+                "All interventions should focus on rebuilding trust, emotional regulation, and positive behavioral decision-making. "
+                "Documentation of progress and a follow-up meeting schedule are strongly encouraged to ensure that the student receives "
+                "consistent, fair, and empathetic supervision."
+            )
+
+        elif level == "high":
+            rec = (
+                "The student's record suggests a high level of behavioral risk that calls for consistent engagement and preventive support. "
+                "The prefect is encouraged to schedule structured reflection or mentoring sessions, ideally on a weekly or biweekly basis, "
+                "to monitor progress and provide feedback. Collaboration with teachers and the Guidance Office is recommended to maintain a unified approach. "
+                "Recognizing small improvements and encouraging open discussion can help the student take ownership of their behavior. "
+                "The focus should remain on gradual progress, empathy, and steady encouragement rather than disciplinary escalation."
+            )
+
+        elif level == "medium":
+            rec = (
+                "The student demonstrates moderate behavioral risk and may benefit from steady encouragement and early intervention. "
+                "The prefect should continue observing the student’s progress, provide constructive feedback after notable interactions, "
+                "and coordinate informally with the class adviser to track behavior trends. "
+                "Simple interventions such as peer mentoring, participation in classroom roles, or recognition of positive habits "
+                "can help reinforce accountability. Consistency, transparency, and approachability are key at this stage."
+            )
+
+        else:  # Low
+            rec = (
+                "The student currently exhibits a low level of behavioral concern and appears to maintain generally positive conduct. "
+                "The prefect is encouraged to continue light supervision and offer positive reinforcement whenever appropriate. "
+                "Acknowledging responsible actions and encouraging participation in community or leadership activities can strengthen intrinsic motivation. "
+                "Maintaining communication and reinforcing good behavior through appreciation and trust will help sustain the student's progress."
+            )
+
+        return make_json_safe({
+            "risk_level": risk_level,
+            "recommendation": rec
+        })
+
+
+
+
+
+
+"""
 class ViolationPredictor:
     def __init__(self, csv_file, dataset_type='training'):
         self.logistic_model = LogisticRegression(max_iter=1000)
@@ -73,7 +399,6 @@ class ViolationPredictor:
     # 🧩 Data Preparation & Training
     # ---------------------------------------------------------------
     def load_and_prepare(self, data: pd.DataFrame):
-        """Prepare dataset for training both models."""
         df = data.copy()
         if "next_repeated_violation" not in df.columns:
             raise ValueError("Missing column: 'next_repeated_violation'")
@@ -117,7 +442,6 @@ class ViolationPredictor:
         self.logistic_model.fit(X_train, y_risk_train)
         self.tree_model.fit(X_train, y_violation_train)
         
-        """
         print("🔹 Logistic Regression — Reoffense Risk")
         print("Logistic Regression Accuracy: ", accuracy_score(y_risk_test, self.logistic_model.predict(X_test)))
         print()
@@ -127,7 +451,6 @@ class ViolationPredictor:
         print("Decision Tree Accuracy: ", accuracy_score(y_violation_test, self.tree_model.predict(X_test)))
         print()
         print(classification_report(y_violation_test, self.tree_model.predict(X_test)))
-        """
         
         
 
@@ -155,7 +478,6 @@ class ViolationPredictor:
     # 🧠 Generate Risk Watchlist
     # ---------------------------------------------------------------
     def generate_watchlist(self, input_data=None):
-        """Generate a risk-ranked student watchlist with balanced correction."""
         if input_data is not None:
             if isinstance(input_data, dict):
                 X_full = pd.DataFrame([input_data])
@@ -284,7 +606,6 @@ class ViolationPredictor:
     # 🔮 Predict All Likely Violations (with recommendations)
     # ---------------------------------------------------------------
     def predict_likely_violations_from_input(self, input_data):
-        """Predict likely future violations dynamically and provide detailed recommendations."""
         if isinstance(input_data, dict):
             X_new = pd.DataFrame([input_data])
         elif isinstance(input_data, list) and all(isinstance(i, dict) for i in input_data):
@@ -373,10 +694,6 @@ class ViolationPredictor:
     # ⚖️ Predict Disciplinary Action (Fair Action Justified by Reoffense Probability)
     # ---------------------------------------------------------------
     def predict_disciplinary_action(self, student):
-        """
-        Predicts a fair disciplinary action level for a student using the Decision Tree model,
-        justified by the reoffense probability estimated from the Logistic Regression model.
-        """
         if isinstance(student, dict):
             student_df = pd.DataFrame([student])
         else:
@@ -558,3 +875,5 @@ class ViolationPredictor:
                 "the student remains on a steady behavioral path, but no disciplinary intervention is required at this time. Instead, prioritize recognition, "
                 "encouragement, and reinforcement of good conduct to promote long-term behavioral maturity and moral integrity."
             )
+            
+            """

@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, render_template
 from flask_cors import CORS
 from webpush import WebPush
 from model_training.config_model import model_vp, model_cca
@@ -6,6 +6,9 @@ from model_training.config_model import model_vp, model_cca
 app = Flask(__name__)
 CORS(app)
 
+@app.route('/')
+def index():
+    return render_template('index.html')
 
 @app.route('/python/incident/risk', methods=['POST'])
 def incident_risk():
@@ -13,7 +16,7 @@ def incident_risk():
     if not data or 'list' not in data:
         return jsonify({"status": "error", "message": "Invalid payload"}), 400
     
-    df = model_vp.generate_watchlist(data['list'])
+    df = model_vp.get_student_risk_monitoring(data['list'])
         
     return jsonify({
         'data': df,
@@ -40,12 +43,16 @@ def predict_remark():
 
     d = data['student'][0]
 
-    pred_tree = model_vp.predict_disciplinary_action(d)
     pred_lg = model_vp.predict_reoffense_risk(d)
+    insights = model_vp.generate_insight(pred_lg)
+    recommendation = model_vp.generate_recommendation(pred_lg.get('risk_level'))
     
     return jsonify({
-        'data': pred_tree,
-        'data2': pred_lg
+        'data': {
+            'pred_lg': pred_lg,
+            'insights': insights,
+            'recommendation': recommendation
+        }
     })
 
 @app.route('/python/webpush', methods=['POST'])

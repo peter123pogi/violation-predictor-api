@@ -48,6 +48,25 @@ class WebPush:
             }
         pass
     
+    def check_expired_subscription(self, endpoints):
+        try:
+            webpush(
+                self.get_subscription(),
+                data="ping",
+                vapid_private_key=self.get_private_key(),
+                vapid_claims={"sub": "mailto:you@example.com"},
+                ttl=0
+            )
+        except WebPushException as ex:
+            print("❌ Failed to send push:", repr(ex))
+            return {
+                'status': 'error',
+                'endpoint': self.endpoint,
+                'message': repr(ex)
+            }
+        pass
+    
+    
     def generate_key(self):
         private_key = ec.generate_private_key(ec.SECP256R1())
 
