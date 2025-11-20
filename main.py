@@ -10,6 +10,20 @@ CORS(app)
 def index():
     return render_template('index.html')
 
+@app.route('/python/incident/test-data/append', methods=['POST'])
+def append_test_data():
+    data = request.get_json()
+    if not data or 'list' not in data:
+        return jsonify({"status": "error", "message": "Invalid payload"}), 400
+    
+    model_vp.append_test_data(data['list'])
+        
+    return jsonify({
+        'status': 'success',
+        'message': 'Test data appended successfully'
+    })
+
+
 @app.route('/python/incident/risk', methods=['POST'])
 def incident_risk():
     data = request.get_json()
@@ -45,7 +59,7 @@ def predict_remark():
 
     pred_lg = model_vp.predict_reoffense_risk(d)
     insights = model_vp.generate_insight(pred_lg)
-    recommendation = model_vp.generate_recommendation(pred_lg.get('risk_level'))
+    recommendation = model_vp.generate_recommendation(d, pred_lg.get('risk_level'))
     
     return jsonify({
         'data': {
@@ -56,7 +70,7 @@ def predict_remark():
     })
 
 @app.route('/python/webpush', methods=['POST'])
-def pushNotification():
+def push_notification():
     json_data = request.get_json()
     data = {
         'title': json_data.get('title'),
@@ -72,6 +86,51 @@ def pushNotification():
     
     print(errors)
     return jsonify({'status': 'success', 'message': 'Data received', 'errors': errors }) 
+
+
+@app.route('/python/webpush/check-subscription-expiration', methods=['POST'])
+def check_expiration():
+    data = request.get_json()
+    if not data or "list" not in data:
+        return jsonify({
+            "status": "error",
+            "message": "Missing 'list'"
+        }), 400
+
+    endpoints = data["list"]
+    print(endpoints)
+    results = []
+
+    for item in endpoints:
+        endpoint = item.get("endpoint")
+        p256dh = item.get("public_key")
+        auth = item.get("auth")
+
+        if not endpoint or not p256dh or not auth:
+            results.append({
+                "endpoint": endpoint,
+                "status": "invalid",
+                "message": "Missing subscription keys"
+            })
+            continue
+
+        # Instance of WebPush for this record
+        wp = WebPush(
+            data={"title": "", "body": "", "icon": "", "url": ""},
+            endpoint=endpoint,
+            public_key=p256dh,
+            auth=auth
+        )
+
+        # Check expiration
+        result = wp.check_expired_subscription(endpoint)
+        results.append(result)
+        
+        print(result)
+    return jsonify({
+        "status": "success",
+        "results": results
+    })
 
 if __name__ == '__main__':
     app.run(port=5000, debug=True)

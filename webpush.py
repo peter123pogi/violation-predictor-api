@@ -48,7 +48,9 @@ class WebPush:
             }
         pass
     
-    def check_expired_subscription(self, endpoints):
+    def check_expired_subscription(self, endpoint):
+        # Update instance endpoint
+        self.set_endpoint(endpoint)
         try:
             webpush(
                 self.get_subscription(),
@@ -57,14 +59,20 @@ class WebPush:
                 vapid_claims={"sub": "mailto:you@example.com"},
                 ttl=0
             )
-        except WebPushException as ex:
-            print("❌ Failed to send push:", repr(ex))
+
             return {
-                'status': 'error',
-                'endpoint': self.endpoint,
-                'message': repr(ex)
+                "endpoint": self.endpoint,
+                "status": "valid"
             }
-        pass
+
+        except WebPushException as ex:
+            return {
+                "endpoint": self.endpoint,
+                "status": "expired",
+                "message": repr(ex)
+            }
+
+
     
     
     def generate_key(self):

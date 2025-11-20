@@ -76,24 +76,24 @@ class ViolationPredictor:
     # 🧩 Data Preparation & Training
     # ---------------------------------------------------------------
     def load_and_prepare(self, data: pd.DataFrame):
-        """Prepare dataset with final engineered features."""
+        """Prepare dataset with simplified features focused on violation behavior."""
         df = data.copy()
         if "will_reoffend_same_violation" not in df.columns:
             raise ValueError("Missing column: 'will_reoffend_same_violation'")
 
-        # --- Final Feature Engineering ---
-        df["violation_rate"] = df["total_violations"] / df["total_incident"].replace(0, np.nan)
-        df["repeat_violation_rate"] = df["total_repeated_violations"] / df["total_violations"].replace(0, np.nan)
-        df["no_violation_rate"] = df["total_no_violation_in_cases"] / df["total_incident"].replace(0, np.nan)
-        df["log_total_incident"] = np.log1p(df["total_incident"])
-        df = df.fillna(0)
+        # --- Feature Selection (Code B style) ---
+        required = ["total_violations", "total_repeated_violations", "total_no_violation_in_cases"]
+        for col in required:
+            if col not in df.columns:
+                raise ValueError(f"Missing column: {col}")
 
-        X = df[["violation_rate", "repeat_violation_rate", "no_violation_rate", "log_total_incident"]]
+        X = df[required]
         y = df["will_reoffend_same_violation"]
 
         self.features = X.columns
         self.student_data = df
         return X, y
+
         
     def train_model(self, csv_file, dataset_type):
         """Train logistic regression model from CSV dataset."""
@@ -118,68 +118,55 @@ class ViolationPredictor:
     # ⚙️ Auto Compute Final Features for Single Input
     # ---------------------------------------------------------------
     def _auto_compute_features(self, student: dict) -> dict:
-        total_incident = student.get("total_incidents", 0)
-        total_violations = student.get("total_violations", 0)
-        total_repeated = student.get("total_repeated_violations", 0)
-        total_no_violation = student.get("total_no_violations", 0)
-
-        violation_rate = total_violations / total_incident if total_incident > 0 else 0
-        repeat_violation_rate = total_repeated / total_violations if total_violations > 0 else 0
-        no_violation_rate = total_no_violation / total_incident if total_incident > 0 else 0
-        log_total_incident = np.log1p(total_incident)
-
+        """
+        Prepare single-student features consistent with Code B logistic model.
+        No proportional metrics, only direct violation-count features.
+        """
         return {
-            "violation_rate": round(violation_rate, 4),
-            "repeat_violation_rate": round(repeat_violation_rate, 4),
-            "no_violation_rate": round(no_violation_rate, 4),
-            "log_total_incident": round(log_total_incident, 4),
+            "total_violations": student.get("total_violations", 0),
+            "total_repeated_violations": student.get("total_repeated_violations", 0),
+            "total_no_violation_in_cases": student.get("total_no_violations", 0),
         }
+
 
     # ---------------------------------------------------------------
     # 🎯 Predict Reoffense Risk for a Student
     # ---------------------------------------------------------------
     def predict_reoffense_risk(self, student_input):
-        """Predict reoffense probability for a single student."""
-        if isinstance(student_input, dict):
-            student = student_input.copy()
-        else:
+        """Predict reoffense probability for a single student (Code B logic)."""
+        if not isinstance(student_input, dict):
             raise TypeError("student_input must be a dict.")
 
-        computed = self._auto_compute_features(student)
+        # Prepare features for prediction
+        computed = self._auto_compute_features(student_input)
         X_single = pd.DataFrame([computed])
 
-        # Predict probability
-        base_prob = float(self.logistic_model.predict_proba(X_single)[0][1])
+        # Predict probability directly
+        prob = float(self.logistic_model.predict_proba(X_single[self.features])[0][1])
+        prob_percent = round(prob * 100, 2)
 
-        # Adjusted probability (behavior + exposure correction)
-        behavior_factor = 1 - (0.9 * computed["no_violation_rate"])  # protective
-        exposure_factor = 1 + min(computed["log_total_incident"] / 5, 0.25)  # exposure scaling
-        adjusted = min(max(base_prob * behavior_factor * exposure_factor, 0), 1)
-
-        # Risk Level Categorization
-        if adjusted >= 0.85:
-            risk_level = "Critical"
-        elif adjusted >= 0.65:
-            risk_level = "High"
-        elif adjusted >= 0.40:
-            risk_level = "Medium"
+        # Risk levels (Code B threshold logic)
+        if prob < 0.30:
+            risk = "Low"
+        elif prob < 0.60:
+            risk = "Moderate"
+        elif prob < 0.85:
+            risk = "High"
         else:
-            risk_level = "Low"
-
+            risk = "Critical"
+            
         return make_json_safe({
-            "student_id": str(student.get("student_id", "Unknown")),
-            "probability_of_reoffense": round(adjusted, 4),
-            "risk_level": risk_level,
-            "total_violations": student_input['total_violations'],
-            "computed_violation_rate": computed["violation_rate"],
-            "total_repeated_violations": student_input['total_repeated_violations'],
-            "computed_repeat_violation_rate": computed["repeat_violation_rate"],
-            "computed_no_violation_rate": computed["no_violation_rate"],
-            "total_incidents": student_input["total_incidents"],
-            "log_total_incident": computed["log_total_incident"],
-            "no_violations": student_input['total_no_violations'],
+            "student_id": str(student_input.get("student_id", "Unknown")),
+            "total_incidents": student_input.get("total_incidents", 0),
+            "probability_of_reoffense": round(prob, 4),
+            "probability_raw": round(prob, 4),
+            "risk_level": risk,
+            "total_violations": student_input.get("total_violations", 0),
+            "total_repeated_violations": student_input.get("total_repeated_violations", 0),
+            "total_no_violations": computed['total_no_violation_in_cases'],
             "note": "Predicted successfully"
         })
+
         
     # ---------------------------------------------------------------
     # 📊 Get Student Risk Monitoring (Batch Watchlist)
@@ -216,105 +203,95 @@ class ViolationPredictor:
     # ---------------------------------------------------------------
     def generate_insight(self, student_result):
         """
-        Generates a balanced, non-judgmental insight summary about a student’s behavioral record.
-        Adapts tone and phrasing according to incident frequency, repetition, and resolution balance.
+        Generates a balanced, non-judgmental insight summary focused on repeated violations.
+        Risk levels used: Low, Moderate, High, Critical.
         """
 
-        total_incident = student_result.get("total_incident", 0)
+        total_incidents = student_result.get("total_incidents", 0)
         total_violations = student_result.get("total_violations", 0)
-        total_repeated_violations = student_result.get("total_repeated_violations", 0)
-        total_no_violations = student_result.get("total_no_violations", 0)
-        risk_level = student_result.get("risk_level", "Unknown")
+        total_repeated = student_result.get("total_repeated_violations", 0)
+        total_no_violation = student_result.get("total_no_violations", 0)
+        risk_level = (student_result.get("risk_level") or "Low").capitalize()
 
-        # --- Derived behavioral indicators ---
-        violation_rate = total_violations / (total_incident + 1)
-        repeat_violation_rate = total_repeated_violations / (total_violations + 1)
-        no_violation_rate = total_no_violations / (total_incident + 1)
-        log_inc = np.log(total_incident + 1)
+        # Derived measures
+        repeat_rate = total_repeated / (total_violations + 1)
+        positive_rate = total_no_violation / (total_violations + 1)
 
-        # --- Risk framing ---
-        if risk_level.lower() == "critical":
-            risk_statement = (
-                "According to behavioral indicators, the student is presently categorized as **CRITICAL RISK** "
-                "for potentially repeating a similar type of incident. This does not imply certainty, but rather highlights "
-                "a pattern that would benefit from structured guidance, active mentoring, and regular check-ins. "
+        # --- Risk framing text ---
+        risk_map = {
+            "Low": (
+                "The student is assessed at a **LOW RISK** of repeating similar violations. "
+                "This suggests generally positive behavior with occasional challenges that can be redirected through supportive guidance. "
+            ),
+            "Moderate": (
+                "The student is assessed at a **MODERATE RISK** of repeating similar violations. "
+                "This indicates emerging behavioral patterns that may benefit from consistent monitoring and mentoring. "
+            ),
+            "High": (
+                "The student is identified as **HIGH RISK** for potentially repeating similar violations. "
+                "This level of concern suggests recurring behavior that may require structured behavioral support and follow-through. "
+            ),
+            "Critical": (
+                "The student is currently identified as **CRITICAL RISK** for repeating similar violations. "
+                "This indicates a significant pattern of behavior requiring immediate and coordinated support from the Prefect, Guidance Office, and guardians. "
+            )
+        }
+
+        risk_statement = risk_map.get(risk_level, risk_map["Low"])
+
+        # --- General violation involvement ---
+        if total_violations == 0:
+            violation_behavior = (
+                "There are **no recorded disciplinary violations**, indicating consistent positive conduct and adherence to school expectations. "
+            )
+        elif total_violations <= 2:
+            violation_behavior = (
+                "The student has had **minimal disciplinary involvement**, suggesting generally stable behavior with isolated concerns. "
+            )
+        elif total_violations <= 5:
+            violation_behavior = (
+                "The student has been involved in **multiple disciplinary cases**, indicating emerging behavioral patterns that could benefit from mentoring. "
             )
         else:
-            risk_statement = (
-                f"According to behavioral indicators, the student is presently categorized as **{risk_level.upper()} RISK** "
-                f"for potentially repeating a similar type of incident. "
+            violation_behavior = (
+                "The student has **numerous disciplinary cases**, suggesting recurring behavior that may require strengthened behavioral interventions. "
             )
 
-        # --- Violation pattern ---
-        if violation_rate >= 0.75:
-            violation_pattern = (
-                "The student has been involved in nearly all recorded cases as disciplinary violations, indicating a consistent pattern "
-                "of behavioral challenges that may require targeted support and clearer reinforcement of expectations. "
+        # --- Repeated violations (Primary factor) ---
+        if total_repeated == 0:
+            repeat_behavior = (
+                "There are **no repeated violations**, suggesting good responsiveness to correction. "
             )
-        elif violation_rate >= 0.4:
-            violation_pattern = (
-                "The student has taken part in several disciplinary situations, showing occasional lapses that could be improved "
-                "through mentoring, reflection, and ongoing feedback. "
+        elif repeat_rate >= 0.40:
+            repeat_behavior = (
+                "A **substantial portion** of recorded violations involve **repeat behavior**, indicating patterns that may require consistent guidance and reflection. "
             )
         else:
-            violation_pattern = (
-                "The student has maintained generally appropriate conduct, with few disciplinary cases recorded. "
-                "Incidents appear to be manageable through encouragement and guidance. "
+            repeat_behavior = (
+                "Some repeated behaviors were observed, showing opportunities for improvement through continued support. "
             )
 
-        # --- Repetition pattern (adjusted threshold so 2/4 is serious) ---
-        if total_repeated_violations == 0:
-            repeat_pattern = (
-                "No repeated violations have been recorded, suggesting developing awareness and responsiveness to feedback. "
+        # --- Positive resolution pattern ---
+        if positive_rate >= 0.50:
+            positive_behavior = (
+                "Several cases were **resolved without further violations**, showing potential for behavioral growth when supported. "
             )
-        elif repeat_violation_rate >= 0.4:
-            repeat_pattern = (
-                "A notable portion of cases involve similar or repeated behaviors, reflecting patterns that would benefit from close supervision "
-                "and reflective interventions. Providing opportunities to practice self-regulation and accountability may help reduce recurrence. "
+        elif positive_rate > 0:
+            positive_behavior = (
+                "There are instances of **positive resolution**, suggesting that encouragement and coaching can reinforce improvement. "
             )
         else:
-            repeat_pattern = (
-                "Some repeated elements have been observed, though improvement remains possible with regular mentoring and open communication. "
+            positive_behavior = (
+                "No cases were resolved without further violations, indicating a need for improved conflict-resolution and self-regulation strategies. "
             )
 
-        # --- Positive resolution factors ---
-        if no_violation_rate >= 0.6:
-            positive_factor = (
-                "Many cases were resolved without violations, indicating responsiveness to corrective strategies and readiness for improvement. "
-            )
-        elif no_violation_rate >= 0.3:
-            positive_factor = (
-                "Several incidents were resolved positively, suggesting the student can apply feedback effectively when supported. "
-            )
-        else:
-            positive_factor = (
-                "Few or no incidents were resolved without violations, indicating that structured opportunities for reflection and guided recovery "
-                "could strengthen behavioral outcomes. "
-            )
-
-        # --- Exposure context ---
-        if log_inc >= 2.5:
-            exposure_context = (
-                "The student has extensive experience with disciplinary procedures, creating a foundation for reflection and progressive improvement "
-                "through sustained guidance. "
-            )
-        elif log_inc <= 1.3:
-            exposure_context = (
-                "The student’s exposure to disciplinary processes has been limited, suggesting an early stage of behavioral development. "
-                "Preventive engagement and positive reinforcement may be most effective at this stage. "
-            )
-        else:
-            exposure_context = (
-                "The student has experienced a moderate number of cases, offering sufficient opportunity for feedback and gradual improvement. "
-            )
-
-        # --- Combine all sections ---
         summary = (
-            f"{risk_statement}{violation_pattern}{repeat_pattern}"
-            f"{positive_factor}{exposure_context}"
-            "Overall, the student demonstrates both areas of progress and aspects needing consistent reinforcement. "
-            "The prefect is encouraged to provide calm, supportive oversight and maintain open communication, focusing on steady improvement "
-            "rather than punitive action."
+            f"{risk_statement}"
+            f"{violation_behavior}"
+            f"{repeat_behavior}"
+            f"{positive_behavior}"
+            "Overall, the student demonstrates areas of strength and opportunities for behavioral growth. "
+            "A supportive and collaborative approach is encouraged to reinforce positive decision-making."
         )
 
         return make_json_safe({
@@ -325,62 +302,75 @@ class ViolationPredictor:
 
 
 
-
-
     # ---------------------------------------------------------------
     # 🎯 Generate Recommendation (Neutral Prefect Advisory Notes)
     # ---------------------------------------------------------------
-    def generate_recommendation(self, risk_level):
+    def generate_recommendation(self, student_result, risk_level):
         """
-        Provides a balanced, developmental recommendation for the prefect based on the student's
-        current risk category. Recommendations emphasize structured guidance, empathy, and positive engagement.
+        Recommends intervention actions based on the defined 4-level scale:
+        Low, Moderate, High, Critical.
         """
 
-        level = risk_level.lower()
+        tr = student_result.get("total_repeated_violations", 0)
+        tnv = student_result.get("total_no_violations", 0)
+        level = (risk_level or "Low").capitalize()
 
-        if level == "critical":
-            rec = (
-                "The student's behavioral indicators reflect a critical level of concern that requires immediate, structured, and compassionate support. "
-                "The prefect should coordinate with the Guidance Office, class adviser, and where appropriate, parents or guardians, "
-                "to organize a formal review of the student’s circumstances. A detailed support plan should be developed that includes "
-                "consistent mentorship, regular progress check-ins, and personalized reflection sessions. "
-                "All interventions should focus on rebuilding trust, emotional regulation, and positive behavioral decision-making. "
-                "Documentation of progress and a follow-up meeting schedule are strongly encouraged to ensure that the student receives "
-                "consistent, fair, and empathetic supervision."
+        base_map = {
+            "Critical": (
+                "A **coordinated intervention** is strongly recommended. The Prefect should collaborate with the "
+                "Guidance Office and guardians to implement a structured Behavioral Support Plan with close monitoring. "
+            ),
+            "High": (
+                "The student may benefit from **regular check-ins and guided reflection sessions**. "
+                "Collaboration with the Guidance Office is advised to reinforce accountability and coping strategies. "
+            ),
+            "Moderate": (
+                "The student may benefit from **consistent encouragement and early intervention strategies**. "
+                "Constructive feedback and positive monitoring may help reinforce behavioral improvement. "
+            ),
+            "Low": (
+                "The student appears to be at **low behavioral risk**. Positive reinforcement and light supervision are "
+                "recommended to maintain progress. "
+            )
+        }
+
+        base = base_map.get(level, base_map["Low"])
+
+        # Repeated behavior advisory
+        if tr > 2:
+            extra = (
+                "Because several violations involve **repeated behavior**, structured mentoring or restorative conversations "
+                "are recommended to encourage behavioral reflection. "
+            )
+        elif tr > 0:
+            extra = (
+                "Since some violations involve **repeated behavior**, occasional reflection meetings may support consistency. "
+            )
+        else:
+            extra = (
+                "With **no repeated violations**, recognizing positive behavior may further strengthen decision-making. "
             )
 
-        elif level == "high":
-            rec = (
-                "The student's record suggests a high level of behavioral risk that calls for consistent engagement and preventive support. "
-                "The prefect is encouraged to schedule structured reflection or mentoring sessions, ideally on a weekly or biweekly basis, "
-                "to monitor progress and provide feedback. Collaboration with teachers and the Guidance Office is recommended to maintain a unified approach. "
-                "Recognizing small improvements and encouraging open discussion can help the student take ownership of their behavior. "
-                "The focus should remain on gradual progress, empathy, and steady encouragement rather than disciplinary escalation."
+        # Positive reinforcement
+        if tnv > 0:
+            positive = (
+                "Cases resolved without further violations suggest that reinforcing positive responses may support continued growth. "
             )
-
-        elif level == "medium":
-            rec = (
-                "The student demonstrates moderate behavioral risk and may benefit from steady encouragement and early intervention. "
-                "The prefect should continue observing the student’s progress, provide constructive feedback after notable interactions, "
-                "and coordinate informally with the class adviser to track behavior trends. "
-                "Simple interventions such as peer mentoring, participation in classroom roles, or recognition of positive habits "
-                "can help reinforce accountability. Consistency, transparency, and approachability are key at this stage."
-            )
-
-        else:  # Low
-            rec = (
-                "The student currently exhibits a low level of behavioral concern and appears to maintain generally positive conduct. "
-                "The prefect is encouraged to continue light supervision and offer positive reinforcement whenever appropriate. "
-                "Acknowledging responsible actions and encouraging participation in community or leadership activities can strengthen intrinsic motivation. "
-                "Maintaining communication and reinforcing good behavior through appreciation and trust will help sustain the student's progress."
+        else:
+            positive = (
+                "Guided conflict-resolution strategies may help the student build stronger emotional and behavioral self-management. "
             )
 
         return make_json_safe({
-            "risk_level": risk_level,
-            "recommendation": rec
+            "risk_level": level,
+            "recommendation": base + extra + positive
         })
 
 
+        
+    def append_test_data(self, list):
+        pass
+        
 
 
 
