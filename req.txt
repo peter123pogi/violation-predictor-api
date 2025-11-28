@@ -4,4 +4,6 @@ pywebpush
 pandas
 gensim
 scikit-learn
+nltk
+huggingface_hub
 gunicorn==23.0.0

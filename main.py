@@ -11,7 +11,7 @@ def index():
     return render_template('index.html')
 
 @app.route('/python/incident/test-data/append', methods=['POST'])
-def append_test_data():
+def append_logistic_test_data():
     data = request.get_json()
     if not data or 'list' not in data:
         return jsonify({"status": "error", "message": "Invalid payload"}), 400
@@ -22,7 +22,6 @@ def append_test_data():
         'status': 'success',
         'message': 'Test data appended successfully'
     })
-
 
 @app.route('/python/incident/risk', methods=['POST'])
 def incident_risk():
@@ -55,7 +54,10 @@ def predict_remark():
     if not data or 'student' not in data:
         return jsonify({"status": "error", "message": "Invalid payload"}), 400
 
-    d = data['student'][0]
+    
+    d = {} if data['student'] == [] else data['student'][0]
+
+
 
     pred_lg = model_vp.predict_reoffense_risk(d)
     insights = model_vp.generate_insight(pred_lg)
@@ -133,4 +135,4 @@ def check_expiration():
     })
 
 if __name__ == '__main__':
-    app.run(port=5000, debug=True)
+    app.run(port=7860, debug=True)
