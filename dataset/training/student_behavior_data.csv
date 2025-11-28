@@ -1,4 +1,4 @@
-student_id,total_incident,total_violations,total_repeated_violations,total_no_violation_in_cases,will_reoffend_same_violation
+student_id,total_incident,total_violations,total_repeated_violations,total_no_violation_in_cases,will_reoffend_another_violation
 S0001,7,5,1,2,0
 S0002,15,8,3,7,0
 S0003,11,4,0,7,0
